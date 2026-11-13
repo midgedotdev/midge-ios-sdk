@@ -116,6 +116,16 @@ final class FakeServer: URLProtocol, @unchecked Sendable {
         #expect(events.first?["responseBody"] as? String == #"{"ok":true}"#)
     }
 
+    @Test func onlyTheAppsOwnLogMessagesAreKept() {
+        #expect(AppLogs.isApps(subsystem: "dev.acme.shop", sender: "Foundation", executable: "Shop"))
+        #expect(AppLogs.isApps(subsystem: "", sender: "Shop", executable: "Shop"))  // NSLog from the app
+        #expect(AppLogs.isApps(subsystem: "", sender: "Shop.debug.dylib", executable: "Shop"))
+        #expect(!AppLogs.isApps(subsystem: "com.apple.network", sender: "Network", executable: "Shop"))
+        #expect(!AppLogs.isApps(subsystem: "com.apple.UIKit", sender: "UIKitCore", executable: "Shop"))
+        #expect(!AppLogs.isApps(subsystem: "", sender: "CFNetwork", executable: "Shop"))
+        #expect(AppLogs.level(.notice) == "info" && AppLogs.level(.fault) == "error")
+    }
+
     @Test func oldEventsAreDropped() {
         EventLog.shared.clear()
         EventLog.shared.add(["kind": "console", "at": EventLog.now() - 6 * 60 * 1000, "text": "old"])

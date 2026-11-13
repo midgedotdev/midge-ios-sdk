@@ -25,6 +25,8 @@ final class ReportFlow {
     var workspace = ""
     var problem: String?
     var elapsed: TimeInterval = 0
+    /// Where the Stop pill is, in the window's coordinates: the only place the overlay takes taps while recording.
+    var pillFrame: CGRect = .zero
     var video: URL?
     var name = ""
     var email = ""
@@ -156,11 +158,14 @@ final class ReportFlow {
     }
 }
 
-/// Touches go through to the app except where Midge's own views are.
+/// Touches go through to the app except where Midge's own views are. SwiftUI draws the Stop pill inside the hosting
+/// view rather than as a view of its own, so a hit on the root view is let through unless it lands on the pill.
 final class PassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
-        return hit == rootViewController?.view ? nil : hit
+        guard hit == rootViewController?.view else { return hit }  // the sheet, presented over the root
+        let onPill = MainActor.assumeIsolated { ReportFlow.shared.phase == .recording && ReportFlow.shared.pillFrame.insetBy(dx: -8, dy: -8).contains(point) }
+        return onPill ? hit : nil
     }
 }
 
@@ -188,6 +193,7 @@ struct ReportOverlay: View {
                 }
                 .padding(.top, 6)
                 .accessibilityLabel("Stop recording the bug report")
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { flow.pillFrame = $0 }
             }
         }
         .sheet(isPresented: sheetShown) {
