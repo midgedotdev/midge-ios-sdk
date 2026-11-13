@@ -2,33 +2,32 @@
 import ObjectiveC
 import UIKit
 
-/// Shaking opens the report: UIWindow's motionEnded is exchanged once for one that calls Midge.report() first.
+/// Shaking opens the report: UIWindow gets its own motionEnded that calls Midge.report() and then the original one.
+///
+/// The original is called with its own selector. UIWindow inherits motionEnded from UIResponder, whose implementation
+/// passes the event up the responder chain under the selector it was called with; exchanging it for a renamed method
+/// made it forward `midge_motionEnded:withEvent:`, which the scene doesn't know, and the app crashed on the first shake.
 @MainActor enum Shake {
     private static var installed = false
 
     static func install() {
         guard !installed else { return }
         installed = true
-        guard let original = class_getInstanceMethod(UIWindow.self, #selector(UIResponder.motionEnded(_:with:))),
-              let replacement = class_getInstanceMethod(UIWindow.self, #selector(UIWindow.midge_motionEnded(_:with:)))
-        else { return }
-        // UIWindow inherits motionEnded from UIResponder: add it to UIWindow first so UIResponder's isn't swapped.
-        if class_addMethod(UIWindow.self, #selector(UIResponder.motionEnded(_:with:)), method_getImplementation(replacement),
-                           method_getTypeEncoding(replacement)) {
-            class_replaceMethod(UIWindow.self, #selector(UIWindow.midge_motionEnded(_:with:)), method_getImplementation(original),
-                                method_getTypeEncoding(original))
-        } else {
-            method_exchangeImplementations(original, replacement)
+        let selector = #selector(UIResponder.motionEnded(_:with:))
+        guard let method = class_getInstanceMethod(UIWindow.self, selector) else { return }
+        typealias MotionEnded = @convention(c) (AnyObject, Selector, UIEvent.EventSubtype, UIEvent?) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: MotionEnded.self)
+        let replacement: @convention(block) (AnyObject, UIEvent.EventSubtype, UIEvent?) -> Void = { window, motion, event in
+            if motion == .motionShake, !(window is PassthroughWindow) {
+                MainActor.assumeIsolated { Midge.report() }
+            }
+            original(window, selector, motion, event)
         }
-    }
-}
-
-extension UIWindow {
-    @objc func midge_motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        if motion == .motionShake, !(self is PassthroughWindow) {
-            MainActor.assumeIsolated { Midge.report() }
+        let implementation = imp_implementationWithBlock(replacement)
+        // Inherited: add UIWindow's own, leaving UIResponder's untouched. Already UIWindow's: replace it in place.
+        if !class_addMethod(UIWindow.self, selector, implementation, method_getTypeEncoding(method)) {
+            method_setImplementation(method, implementation)
         }
-        midge_motionEnded(motion, with: event)
     }
 }
 #endif
