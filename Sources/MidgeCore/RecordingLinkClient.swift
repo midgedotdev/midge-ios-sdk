@@ -56,6 +56,20 @@ public struct RecordingLinkClient: Sendable {
             self.code = code
         }
         public var errorDescription: String? { message }
+
+        /// The workspace has used its storage budget (507): sending again won't help until recordings are deleted.
+        public static let workspaceFullCode = "workspace_storage_full"
+        public static let workspaceFull = Failure(
+            message: "This workspace is out of storage and can’t take new reports. Let the people who shared this link know.", code: workspaceFullCode)
+
+        /// midge.dev's refusal in plain words: its `detail` and `code`, and a sentence for codes it sends bare.
+        static func from(status: Int, data: Data) -> Failure {
+            let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let detail = body["detail"] as? String
+            if status == 507 || detail == workspaceFullCode { return workspaceFull }
+            if detail == "storage_full" { return Failure(message: "midge.dev is out of space right now. Try again later.", code: detail) }
+            return Failure(message: detail ?? "Midge answered \(status).", code: body["code"] as? String)
+        }
     }
 
     private var base: URL { origin.appending(path: "api/record/\(token)/") }
@@ -78,10 +92,7 @@ public struct RecordingLinkClient: Sendable {
         }
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else {
-            let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            throw Failure(message: body["detail"] as? String ?? "Midge answered \(status).", code: body["code"] as? String)
-        }
+        guard (200..<300).contains(status) else { throw Failure.from(status: status, data: data) }
         return try Self.decoder.decode(T.self, from: data)
     }
 
@@ -107,9 +118,11 @@ public struct RecordingLinkClient: Sendable {
             request.httpMethod = "PATCH"
             request.setValue(String(offset), forHTTPHeaderField: "Upload-Offset")
             request.setValue("application/offset+octet-stream", forHTTPHeaderField: "Content-Type")
-            let (_, response) = try await session.upload(for: request, from: part)
+            let (data, response) = try await session.upload(for: request, from: part)
             let http = response as? HTTPURLResponse
             guard let http, (200..<300).contains(http.statusCode) || http.statusCode == 409 else {
+                // A full workspace or a link over its daily bytes says so; trying again won't help.
+                if let http, [429, 507].contains(http.statusCode) { throw Failure.from(status: http.statusCode, data: data) }
                 throw Failure(message: "The upload stopped. Check your connection and try again.")
             }
             offset = http.value(forHTTPHeaderField: "Upload-Offset").flatMap(Int64.init) ?? offset + Int64(part.count)

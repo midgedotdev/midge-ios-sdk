@@ -470,6 +470,42 @@
 			action: "tab",
 			text: document.visibilityState
 		}));
+		const FAILED = "Didn't load (Safari doesn't report the status code)";
+		const failedUrls = /* @__PURE__ */ new Map();
+		const SETTLE_MS = 1e3;
+		const resourceEvent = (entry, failed) => ({
+			kind: "network",
+			at: Math.round(performance.timeOrigin + entry.startTime),
+			method: "GET",
+			url: entry.name,
+			status: failed ? 0 : null,
+			type: resourceType(entry.initiatorType, entry.name),
+			durationMs: Math.round(entry.duration),
+			...failed ? { error: FAILED } : {}
+		});
+		window.addEventListener("error", (e) => {
+			if ("responseStatus" in PerformanceResourceTiming.prototype) return;
+			const el = e.target;
+			if (!(el instanceof HTMLImageElement || el instanceof HTMLScriptElement || el instanceof HTMLLinkElement || el instanceof HTMLMediaElement || el instanceof HTMLSourceElement)) return;
+			const url = el instanceof HTMLLinkElement ? el.href : el.currentSrc || el.src;
+			if (!url || failedUrls.has(url)) return;
+			const at = Date.now();
+			failedUrls.set(url, at);
+			setTimeout(() => {
+				if (failedUrls.get(url) !== at) return;
+				failedUrls.delete(url);
+				emit({
+					kind: "network",
+					at,
+					method: "GET",
+					url,
+					status: 0,
+					type: resourceType(el.localName === "source" ? "video" : el.localName, url),
+					durationMs: 0,
+					error: FAILED
+				});
+			}, SETTLE_MS * 2);
+		}, true);
 		try {
 			new PerformanceObserver((list) => {
 				for (const entry of list.getEntries()) {
@@ -478,15 +514,23 @@
 						"xmlhttprequest",
 						"beacon"
 					].includes(entry.initiatorType)) continue;
-					emit({
-						kind: "network",
-						at: Math.round(performance.timeOrigin + entry.startTime),
-						method: "GET",
-						url: entry.name,
-						status: entry.responseStatus ?? null,
-						type: resourceType(entry.initiatorType, entry.name),
-						durationMs: Math.round(entry.duration)
-					});
+					if (entry.responseStatus !== void 0) {
+						emit({
+							kind: "network",
+							at: Math.round(performance.timeOrigin + entry.startTime),
+							method: "GET",
+							url: entry.name,
+							status: entry.responseStatus,
+							type: resourceType(entry.initiatorType, entry.name),
+							durationMs: Math.round(entry.duration)
+						});
+						continue;
+					}
+					setTimeout(() => {
+						const failed = failedUrls.has(entry.name);
+						failedUrls.delete(entry.name);
+						emit(resourceEvent(entry, failed));
+					}, SETTLE_MS);
 				}
 			}).observe({
 				type: "resource",

@@ -99,6 +99,46 @@ final class FakeServer: URLProtocol, @unchecked Sendable {
         }
     }
 
+    func sendFails(_ routes: [String: (Int, [String: String], Data)]) async throws -> RecordingLinkClient.Failure? {
+        FakeServer.routes = routes
+        let video = FileManager.default.temporaryDirectory.appending(path: "sdk-test3.mp4")
+        try Data(repeating: 1, count: 10).write(to: video)
+        let client = RecordingLinkClient(origin: URL(string: "https://midge.test")!, token: "rl_1", app: "com.example.shop", session: session())
+        do {
+            _ = try await Sender(client: client, includeLogs: false).send(
+                .init(video: video, startedAt: Date(), endedAt: Date(), name: "", email: "", description: ""),
+                redaction: nil, context: [:]) { _ in }
+            return nil
+        } catch let failure as RecordingLinkClient.Failure {
+            return failure
+        }
+    }
+
+    @Test func aFullWorkspaceSaysSoAtSubmit() async throws {
+        let failure = try await sendFails([
+            "/api/record/rl_1/submit/": (507, [:], Data(#"{"detail":"workspace_storage_full"}"#.utf8)),
+        ])
+        #expect(failure?.code == "workspace_storage_full")
+        #expect(failure?.message == "This workspace is out of storage and can’t take new reports. Let the people who shared this link know.")
+    }
+
+    @Test func aFullWorkspaceOrADailyLimitStopsTheUpload() async throws {
+        let up = #"{"url":"https://midge.test/api/uploads/v/","chunk_bytes":4}"#
+        let started = Data(#"{"id":"r1","upload":\#(up),"finish":"claim"}"#.utf8)
+        FakeServer.seen = []
+        let full = try await sendFails([
+            "/api/record/rl_1/submit/": (201, [:], started),
+            "/api/uploads/v/": (507, [:], Data(#"{"detail":"workspace_storage_full"}"#.utf8)),
+        ])
+        #expect(full?.code == "workspace_storage_full")
+        #expect(FakeServer.seen.filter { $0.url?.path() == "/api/uploads/v/" }.count == 1)  // not retried
+        let daily = try await sendFails([
+            "/api/record/rl_1/submit/": (429, [:], Data(#"{"detail":"This link has had too many recordings today. Try again tomorrow.","code":"link_daily_bytes"}"#.utf8)),
+        ])
+        #expect(daily?.code == "link_daily_bytes")
+        #expect(daily?.message.contains("Try again tomorrow") == true)
+    }
+
     @Test func networkCaptureRecordsRequestsAndPassesThemOn() async throws {
         EventLog.shared.clear()
         FakeServer.routes = ["/items": (200, ["Content-Type": "application/json"], Data(#"{"ok":true}"#.utf8))]

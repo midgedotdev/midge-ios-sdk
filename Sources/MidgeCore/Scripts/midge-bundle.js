@@ -136,7 +136,20 @@
 		"signature",
 		"cardnumber",
 		"cvv",
-		"cvc"
+		"cvc",
+		"pwd",
+		"passcode",
+		"passphrase",
+		"userpass",
+		"otpcode",
+		"mfacode",
+		"totp",
+		"verificationcode",
+		"securitycode",
+		"pincode",
+		"seedphrase",
+		"mnemonic",
+		"codeverifier"
 	];
 	/**
 	* @param {string} name   Field / parameter name as it appears in the payload.
@@ -391,7 +404,7 @@
 			if (eq < 0) return pair;
 			const rawKey = pair.slice(0, eq);
 			const rawValue = pair.slice(eq + 1);
-			if (isSensitiveField(decodeFormPart(rawKey), opts.extraFieldNames)) {
+			if (isSensitiveKey(rawKey, opts.extraFieldNames)) {
 				opts.report?.count("bodyField");
 				return `${rawKey}=${REDACTED}`;
 			}
@@ -417,7 +430,7 @@
 			if (/filename=/i.test(headers)) {
 				if (/[\u0000-\u0008\u000e-\u001f]/.test(content)) return part;
 				next = redactBody(content, /content-type:\s*([^\r\n;]+)/i.exec(headers)?.[1] ?? null, opts);
-			} else if (isSensitiveField(name, opts.extraFieldNames)) {
+			} else if (isSensitiveKey(name, opts.extraFieldNames)) {
 				opts.report?.count("bodyField");
 				next = REDACTED;
 			} else next = redactText(content, opts);
@@ -496,7 +509,11 @@
 	function redactParams(params, opts) {
 		return params.split("&").map((pair) => {
 			const eq = pair.indexOf("=");
-			if (eq < 0) return pair;
+			if (eq < 0) {
+				const value = safeDecode(pair);
+				const redacted = redactText(value, opts);
+				return redacted === value ? pair : encodeURIComponent(redacted).replaceAll(encodeURIComponent(REDACTED), REDACTED);
+			}
 			const rawKey = pair.slice(0, eq);
 			const key = safeDecode(rawKey);
 			if (SENSITIVE_URL_PARAMS.has(key.toLowerCase()) || isSensitiveField(key, opts.extraFieldNames)) {
@@ -644,7 +661,7 @@
 				if (typeof req.postData.text === "string") req.postData.text = redactBody(req.postData.text, req.postData.mimeType ?? null, o);
 				for (const p of req.postData.params ?? []) {
 					if (!p || typeof p.value !== "string") continue;
-					if (isSensitiveField(p.name, o.extraFieldNames)) {
+					if (isSensitiveKey(String(p.name), o.extraFieldNames)) {
 						p.value = REDACTED;
 						report.count("bodyField");
 					} else p.value = redactText(p.value, o);
@@ -704,12 +721,15 @@
 	}
 	// src/lib/bundle.js
 	var contentTypeOf = (pairs) => (pairs ?? []).find(([k]) => k === "content-type")?.[1] ?? null;
-	/** Every string inside a JSON value through the text rules (the site's metadata can hold anything). */
-	function redactDeep(r, value, depth = 0) {
+	/**
+	* Every string inside a JSON value through the text rules (the site's metadata can hold anything), and the whole
+	* value under a sensitive key (`password`, `pin`, `apiKey`, the workspace's own names) replaced with REDACTED.
+	*/
+	function redactDeep(r, value, depth = 0, extraFieldNames = redactorOptions().extraFieldNames) {
 		if (typeof value === "string") return r.text(value);
 		if (depth > 8 || value === null || typeof value !== "object") return value;
-		if (Array.isArray(value)) return value.map((v) => redactDeep(r, v, depth + 1));
-		return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(r, v, depth + 1)]));
+		if (Array.isArray(value)) return value.map((v) => redactDeep(r, v, depth + 1, extraFieldNames));
+		return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, isSensitiveKey(k, extraFieldNames) ? REDACTED : redactDeep(r, v, depth + 1, extraFieldNames)]));
 	}
 	function redactPairs(r, pairs) {
 		if (!Array.isArray(pairs)) return [];
@@ -776,7 +796,7 @@
 				bundle.actions.push({
 					t: t(e),
 					kind: e.action,
-					...e.selector ? { selector: e.selector } : {},
+					...e.selector ? { selector: r.text(String(e.selector)) } : {},
 					...e.text ? { text: r.text(e.text) } : {}
 				});
 				break;
